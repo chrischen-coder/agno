@@ -47,11 +47,9 @@ def log_team_telemetry(team: "Team", session_id: str, run_id: Optional[str] = No
     if not team.telemetry:
         return
 
-    # Everything telemetry needs, the import included, stays inside the try:
-    # a telemetry failure must never change the outcome of the run.
-    try:
-        from agno.api.team import TeamRunCreate, create_team_run
+    from agno.api.team import TeamRunCreate, create_team_run
 
+    try:
         create_team_run(
             run=TeamRunCreate(session_id=session_id, run_id=run_id, data=get_telemetry_data(team)),
         )
@@ -68,9 +66,9 @@ async def alog_team_telemetry(team: "Team", session_id: str, run_id: Optional[st
     if not team.telemetry:
         return
 
-    try:
-        from agno.api.team import TeamRunCreate, acreate_team_run
+    from agno.api.team import TeamRunCreate, acreate_team_run
 
+    try:
         await acreate_team_run(run=TeamRunCreate(session_id=session_id, run_id=run_id, data=get_telemetry_data(team)))
     except Exception as e:
         log_debug(f"Could not create Team run telemetry event: {e}")

@@ -20,8 +20,6 @@ from agno.db.base import (
     ComponentType,
     ComponentVersionConflictError,
     SessionType,
-    current_version_guard_clause,
-    current_version_matches,
     project_config_identity,
 )
 from agno.db.migrations.manager import MigrationManager
@@ -524,6 +522,9 @@ class PostgresDb(BaseDb):
                             is not None
                         )
                         if exists:
+                            log_debug(
+                                f"Index {idx.name} already exists in {self.db_schema}.{table_name}, skipping creation"
+                            )
                             continue
 
                     idx.create(self.db_engine)
@@ -4457,9 +4458,7 @@ class PostgresDb(BaseDb):
                 if user_id is not None and row.user_id != user_id:
                     return False
                 component_type = str(row.component_type)
-                if expected_current_version is not None and not current_version_matches(
-                    row.current_version, expected_current_version
-                ):
+                if expected_current_version is not None and row.current_version != expected_current_version:
                     raise ComponentVersionConflictError(
                         f"Component {component_id} current version is {row.current_version}, "
                         f"expected {expected_current_version}"
@@ -4502,7 +4501,7 @@ class PostgresDb(BaseDb):
                         component_delete = component_delete.where(components_table.c.user_id == user_id)
                     if expected_current_version is not None:
                         component_delete = component_delete.where(
-                            current_version_guard_clause(components_table.c.current_version, expected_current_version)
+                            components_table.c.current_version == expected_current_version
                         )
                     result = sess.execute(component_delete)
                     if result.rowcount == 0 and expected_current_version is not None:
@@ -4532,7 +4531,7 @@ class PostgresDb(BaseDb):
                         archive_update = archive_update.where(components_table.c.user_id == user_id)
                     if expected_current_version is not None:
                         archive_update = archive_update.where(
-                            current_version_guard_clause(components_table.c.current_version, expected_current_version)
+                            components_table.c.current_version == expected_current_version
                         )
                     result = sess.execute(archive_update)
                     if result.rowcount == 0 and expected_current_version is not None:
@@ -5468,7 +5467,7 @@ class PostgresDb(BaseDb):
                         # UPDATE so two publishers expecting the same current
                         # version cannot both win.
                         projection_update = projection_update.where(
-                            current_version_guard_clause(components_table.c.current_version, expected_current_version)
+                            components_table.c.current_version == expected_current_version
                         )
                     projection_result = sess.execute(projection_update)
                     if projection_result.rowcount == 0:
@@ -5868,7 +5867,7 @@ class PostgresDb(BaseDb):
                             components_table.c.component_id == component_id
                         )
                     ).scalar()
-                    if not current_version_matches(pointer, expected_current_version):
+                    if pointer != expected_current_version:
                         raise ComponentVersionConflictError(
                             f"Component {component_id} current version is {pointer}, "
                             f"expected {expected_current_version}"
@@ -5896,7 +5895,7 @@ class PostgresDb(BaseDb):
                     pointer_update = pointer_update.where(components_table.c.user_id == user_id)
                 if expected_current_version is not None:
                     pointer_update = pointer_update.where(
-                        current_version_guard_clause(components_table.c.current_version, expected_current_version)
+                        components_table.c.current_version == expected_current_version
                     )
                 result = sess.execute(pointer_update)
 
@@ -6827,10 +6826,15 @@ class PostgresDb(BaseDb):
         limit: int = 100,
         page: int = 1,
         user_id: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         try:
             table = self._get_table(table_type="schedules")
             if table is None:
+                # _get_table also returns None on connection errors (is_table_available
+                # swallows them), so strict callers must not see this as an empty catalog
+                if raise_on_error:
+                    raise RuntimeError("schedules table unavailable (database error or table never created)")
                 return [], 0
             with self.Session() as sess:
                 # Build base query with filters
@@ -6847,12 +6851,15 @@ class PostgresDb(BaseDb):
                 # Calculate offset from page
                 offset = (page - 1) * limit
 
-                # Get paginated results
-                stmt = base_query.order_by(table.c.created_at.desc()).limit(limit).offset(offset)
+                # Get paginated results (id is a unique tiebreaker so offset pages do not overlap
+                # or skip rows when many schedules share a created_at second)
+                stmt = base_query.order_by(table.c.created_at.desc(), table.c.id.desc()).limit(limit).offset(offset)
                 results = sess.execute(stmt).fetchall()
                 return [dict(row._mapping) for row in results], total_count
         except Exception as e:
             log_debug(f"Error listing schedules: {e}")
+            if raise_on_error:
+                raise
             return [], 0
 
     def create_schedule(self, schedule_data: Dict[str, Any]) -> Dict[str, Any]:

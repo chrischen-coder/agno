@@ -16,9 +16,7 @@ class TeamMode(str, Enum):
     """Router pattern. Leader routes to a specialist and returns the member's response directly."""
 
     broadcast = "broadcast"
-    """Broadcast pattern. Leader delegates the same task to every member.
-
-    ``arun`` runs the members concurrently; ``run`` runs them in sequence."""
+    """Broadcast pattern. Leader delegates the same task to all members simultaneously."""
 
     tasks = "tasks"
     """Autonomous task-based execution. Leader decomposes goals into a shared task list,

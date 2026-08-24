@@ -190,20 +190,15 @@ async def test_get_metrics_refreshes_lazily_and_throttles(stats_db: AsyncPostgre
 
     # No calculate_metrics call: get_metrics must refresh on its own
     rows, _ = await stats_db.get_metrics()
-    assert {row["user_id"] for row in rows} == {"user-1"}
-    assert sum(row["agent_sessions_count"] for row in rows) == 1
+    assert len(rows) == 1
+    assert rows[0]["agent_sessions_count"] == 1
 
     # A second read within the throttle window must not recompute
     await seed_session("user-2")
     rows, _ = await stats_db.get_metrics()
-    assert {row["user_id"] for row in rows} == {"user-1"}
-    assert sum(row["agent_sessions_count"] for row in rows) == 1
+    assert rows[0]["agent_sessions_count"] == 1
 
-    # Expiring the throttle picks the new session up. Metrics bucket per owner,
-    # so a second owner arrives as its own row instead of raising the first
-    # row's count, and get_metrics does not order its rows - assert on the set
-    # of owners and the total, never on a positional row.
+    # Expiring the throttle picks the new session up
     stats_db._metrics_refreshed_at = 0.0
     rows, _ = await stats_db.get_metrics()
-    assert {row["user_id"] for row in rows} == {"user-1", "user-2"}
-    assert sum(row["agent_sessions_count"] for row in rows) == 2
+    assert rows[0]["agent_sessions_count"] == 2

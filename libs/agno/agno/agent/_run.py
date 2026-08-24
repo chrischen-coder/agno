@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import time
 from collections import deque
+from copy import deepcopy
 from time import time as unix_time
 from typing import (
     TYPE_CHECKING,
@@ -1362,11 +1363,14 @@ def run_dispatch(
         files=file_artifacts,
     )
 
-    # Read existing session and update metadata BEFORE resolving run options,
-    # so that session-stored metadata is visible to resolve_run_options.
+    # Read the existing session so session-stored metadata is visible to
+    # resolve_run_options via session_metadata.
     from agno.agent._storage import read_or_create_session, update_metadata
 
     agent_session = read_or_create_session(agent, session_id=session_id, user_id=user_id)
+    # Snapshot BEFORE update_metadata merges agent.metadata into the session dict,
+    # so the session layer keeps the session's own values (agent < session < call-site).
+    session_metadata = deepcopy(agent_session.metadata)
     update_metadata(agent, session=agent_session)
 
     # Resolve all run options centrally
@@ -1381,6 +1385,7 @@ def run_dispatch(
         dependencies=dependencies,
         knowledge_filters=knowledge_filters,
         metadata=metadata,
+        session_metadata=session_metadata,
         output_schema=output_schema,
     )
 
@@ -2867,18 +2872,23 @@ def arun_dispatch(  # type: ignore
         files=file_artifacts,
     )
 
-    # Read existing session and update metadata BEFORE resolving run options,
-    # so that session-stored metadata is visible to resolve_run_options.
+    # Read the existing session so session-stored metadata is visible to
+    # resolve_run_options via session_metadata.
     # Note: arun_dispatch is NOT async, so we can only pre-read with a sync DB.
-    # For async DB, _arun/_arun_stream will handle the session read themselves.
+    # For async DB, _arun/_arun_stream read the session AFTER options are resolved,
+    # so session metadata does not reach this run's resolved options there.
     from agno.agent._init import has_async_db
     from agno.agent._storage import update_metadata
 
     _pre_session: Optional[AgentSession] = None
+    _session_metadata: Optional[Dict[str, Any]] = None
     if not has_async_db(agent):
         from agno.agent._storage import read_or_create_session
 
         _pre_session = read_or_create_session(agent, session_id=session_id, user_id=user_id)
+        # Snapshot BEFORE update_metadata merges agent.metadata into the session dict,
+        # so the session layer keeps the session's own values (agent < session < call-site).
+        _session_metadata = deepcopy(_pre_session.metadata)
         update_metadata(agent, session=_pre_session)
 
     # Resolve all run options centrally
@@ -2893,6 +2903,7 @@ def arun_dispatch(  # type: ignore
         dependencies=dependencies,
         knowledge_filters=knowledge_filters,
         metadata=metadata,
+        session_metadata=_session_metadata,
         output_schema=output_schema,
     )
 
@@ -3214,26 +3225,6 @@ def _resolve_continue_from(
     raise ValueError("`continue_from` must be an integer message index, 'end', or 'last_user'.")
 
 
-def _restore_continue_context_metadata(
-    run_context: RunContext,
-    run_response: Optional[RunOutput],
-    run_id: Optional[str],
-    session: Optional[AgentSession],
-) -> None:
-    """Reserved run-metadata for a resume comes from the paused run row, never
-    from caller input: a rebuilt lineage presents a nested run as top-level and
-    resets the dispatch guard one approval at a time. Safe at every continue
-    entry point -- restoring the same stored values twice is a no-op."""
-    from agno.db.schemas.scheduler import restore_reserved_run_metadata
-
-    stored_run = (
-        run_response
-        if run_response is not None
-        else next((r for r in getattr(session, "runs", None) or [] if getattr(r, "run_id", None) == run_id), None)
-    )
-    run_context.metadata = restore_reserved_run_metadata(run_context.metadata, getattr(stored_run, "metadata", None))
-
-
 def _resolve_continue_owner(
     run_response: Optional[RunOutput],
     *,
@@ -3422,6 +3413,9 @@ def continue_run_dispatch(
 
     # Read existing session from storage
     agent_session = read_or_create_session(agent, session_id=session_id, user_id=user_id)
+    # Snapshot BEFORE update_metadata merges agent.metadata into the session dict,
+    # so the session layer keeps the session's own values (agent < session < call-site).
+    session_metadata = deepcopy(agent_session.metadata)
     update_metadata(agent, session=agent_session)
 
     # Fall back to the owner the run paused with, so the resume retrieves under the same scope
@@ -3430,21 +3424,6 @@ def continue_run_dispatch(
 
     # Initialize session state. Get it from DB if relevant.
     session_state = load_session_state(agent, session=agent_session, session_state={})
-
-    # A resumed run keeps its runtime-owned metadata: the dispatch lineage,
-    # hop count and version stamp live on the paused run row, and rebuilding
-    # them from caller input would present a nested run as top-level --
-    # resetting the dispatch guard one human approval at a time. The stored
-    # values win, and caller-supplied reserved keys are dropped the way every
-    # other seam drops them.
-    from agno.db.schemas.scheduler import restore_reserved_run_metadata
-
-    _stored_run = (
-        run_response
-        if run_response is not None
-        else next((r for r in agent_session.runs or [] if r.run_id == run_id), None)
-    )
-    metadata = restore_reserved_run_metadata(metadata, getattr(_stored_run, "metadata", None))
 
     # Resolve all run options centrally
     opts = resolve_run_options(
@@ -3455,6 +3434,7 @@ def continue_run_dispatch(
         dependencies=dependencies,
         knowledge_filters=knowledge_filters,
         metadata=metadata,
+        session_metadata=session_metadata,
     )
 
     # Initialize run context
@@ -4289,16 +4269,22 @@ def acontinue_run_dispatch(  # type: ignore
     # Initialize the Agent
     agent.initialize_agent(debug_mode=debug_mode)
 
-    # Read existing session and update metadata BEFORE resolving run options,
-    # so that session-stored metadata is visible to resolve_run_options.
+    # Pre-read the session so session-stored metadata is visible to
+    # resolve_run_options via session_metadata. Only possible with a sync DB:
+    # with an async DB the session is read inside _arun AFTER options are
+    # resolved, so session metadata does not reach this run's resolved options.
     from agno.agent._init import has_async_db
 
     _session_state: Dict[str, Any] = {}
     _pre_session: Optional[AgentSession] = None
+    _session_metadata: Optional[Dict[str, Any]] = None
     if not has_async_db(agent):
         from agno.agent._storage import load_session_state, read_or_create_session, update_metadata
 
         _pre_session = read_or_create_session(agent, session_id=session_id, user_id=user_id)
+        # Snapshot BEFORE update_metadata merges agent.metadata into the session dict,
+        # so the session layer keeps the session's own values (agent < session < call-site).
+        _session_metadata = deepcopy(_pre_session.metadata)
         update_metadata(agent, session=_pre_session)
         _session_state = load_session_state(agent, session=_pre_session, session_state={})
 
@@ -4316,6 +4302,7 @@ def acontinue_run_dispatch(  # type: ignore
         dependencies=dependencies,
         knowledge_filters=knowledge_filters,
         metadata=metadata,
+        session_metadata=_session_metadata,
     )
 
     # Prepare arguments for the model
@@ -4465,10 +4452,6 @@ async def _acontinue_run_background_stream(
         user_id = _resolve_continue_owner(run_response, run_id=_run_id, session=agent_session)
         if user_id is not None:
             run_context.user_id = user_id
-
-    # Same restore as the executors: the background wrapper persists and
-    # schedules with this run_context, so it must carry the stored lineage.
-    _restore_continue_context_metadata(run_context, run_response=run_response, run_id=_run_id, session=agent_session)
 
     update_metadata(agent, session=agent_session)
 
@@ -4753,14 +4736,6 @@ async def _acontinue_run(
                     user_id = _resolve_continue_owner(run_response, run_id=run_id, session=agent_session)
                     if user_id is not None:
                         run_context.user_id = user_id
-
-                # A resumed run keeps its runtime-owned metadata (dispatch
-                # lineage, hop count, version stamp); on the async path the
-                # session may only be readable here, so the restore happens at
-                # the load point. Idempotent with the dispatch-time restore.
-                _restore_continue_context_metadata(
-                    run_context, run_response=run_response, run_id=run_id, session=agent_session
-                )
 
                 # 2. Resolve dependencies
                 if run_context.dependencies is not None:
@@ -5122,12 +5097,8 @@ async def _acontinue_run(
                 if isinstance(cancel_exc, asyncio.CancelledError):
                     raise
                 return run_response
-            except (ValueError, RunNotFoundError):
-                # Validation errors (e.g. cancelled run, unknown run id, missing
-                # args) propagate to the caller. RunNotFoundError must NOT fall
-                # through to the generic handler below: that one stamps a terminal
-                # ERROR run row, which for an unresolvable run_id overwrites the
-                # target run (owner, status and content) or fabricates a junk row.
+            except ValueError:
+                # Validation errors (e.g. cancelled run, missing args) propagate to the caller
                 raise
             except Exception as e:
                 run_response = cast(RunOutput, run_response)
@@ -5177,8 +5148,7 @@ async def _acontinue_run(
         await disconnect_mcp_tools(agent)
 
         # Always clean up the run tracking
-        if run_response is not None and run_response.run_id:
-            await acleanup_run(run_response.run_id)
+        await acleanup_run(run_response.run_id)  # type: ignore
     return run_response  # type: ignore
 
 
@@ -5252,14 +5222,6 @@ async def _acontinue_run_stream(
                     user_id = _resolve_continue_owner(run_response, run_id=run_id, session=agent_session)
                     if user_id is not None:
                         run_context.user_id = user_id
-
-                # A resumed run keeps its runtime-owned metadata (dispatch
-                # lineage, hop count, version stamp); on the async path the
-                # session may only be readable here, so the restore happens at
-                # the load point. Idempotent with the dispatch-time restore.
-                _restore_continue_context_metadata(
-                    run_context, run_response=run_response, run_id=run_id, session=agent_session
-                )
 
                 # 2. Update session state and metadata
                 update_metadata(agent, session=agent_session)
@@ -5741,12 +5703,8 @@ async def _acontinue_run_stream(
                     yield run_response
                 break
 
-            except (ValueError, RunNotFoundError):
-                # Validation errors (e.g. cancelled run, unknown run id, missing
-                # args) propagate to the caller. RunNotFoundError must NOT fall
-                # through to the generic handler below: that one stamps a terminal
-                # ERROR run row, which for an unresolvable run_id overwrites the
-                # target run (owner, status and content) or fabricates a junk row.
+            except ValueError:
+                # Validation errors (e.g. cancelled run, missing args) propagate to the caller
                 raise
             except Exception as e:
                 if run_response is None:

@@ -1,9 +1,4 @@
-"""Tests for the service accounts REST API router.
-
-``_authenticated_app`` builds a bare ``FastAPI()``, so these tests exercise
-FastAPI's default exception handlers, not agno's. The owned-app contract
-(AgentOS's own handlers) is pinned in ``tests/unit/os/test_validation_error_body.py``.
-"""
+"""Tests for the service accounts REST API router."""
 
 import time
 from unittest.mock import MagicMock

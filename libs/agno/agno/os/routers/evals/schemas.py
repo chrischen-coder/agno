@@ -98,7 +98,7 @@ class EvalSchema(BaseModel):
             else None
         )
         return cls(
-            id=result.run_id,
+            id=accuracy_eval.eval_id,
             name=accuracy_eval.name,
             agent_id=accuracy_eval.agent.id if accuracy_eval.agent else None,
             team_id=accuracy_eval.team.id if accuracy_eval.team else None,
@@ -142,7 +142,7 @@ class EvalSchema(BaseModel):
         team_id: Optional[str] = None,
     ) -> "EvalSchema":
         return cls(
-            id=result.run_id,
+            id=performance_eval.eval_id,
             name=performance_eval.name,
             agent_id=agent_id,
             team_id=team_id,
@@ -164,7 +164,7 @@ class EvalSchema(BaseModel):
         team_id: Optional[str] = None,
     ) -> "EvalSchema":
         return cls(
-            id=result.run_id,
+            id=reliability_eval.eval_id,
             name=reliability_eval.name,
             agent_id=agent_id,
             team_id=team_id,

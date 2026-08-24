@@ -98,40 +98,6 @@ class ComponentVersionConflictError(ValueError):
     number. Retry after re-reading the component."""
 
 
-# A component that has never been published has no live version: its
-# current_version is NULL, and no integer compares equal to NULL, so an
-# expected_current_version guard on a first publish could never be satisfied.
-# Version numbers start at 1, which leaves 0 free to spell "I expect no live
-# version" - an ordinary compare-and-set request that a first publish can
-# satisfy and that a publish landing in the gap makes fail, like any other.
-NO_LIVE_VERSION = 0
-
-
-def expects_no_live_version(expected: Any) -> bool:
-    """Whether an expected_current_version value is the "nothing is live"
-    spelling. Only the integer 0 qualifies: False compares equal to 0 in
-    Python and JSON guards can arrive as booleans through lax coercion, and a
-    boolean is not a version number, so it never names the sentinel."""
-    return not isinstance(expected, bool) and expected == NO_LIVE_VERSION
-
-
-def current_version_matches(current: Optional[int], expected: int) -> bool:
-    """The Python half of the expected_current_version guard: does the stored
-    live pointer satisfy the expectation? 0 expects no live version at all."""
-    if expects_no_live_version(expected):
-        return current is None
-    return current == expected
-
-
-def current_version_guard_clause(current_version_column: Any, expected: int) -> Any:
-    """The SQL half of the same guard: the predicate that rides the write, so
-    that two writers expecting the same pointer cannot both win. Takes a
-    SQLAlchemy column and returns the clause to put on the UPDATE/DELETE."""
-    if expects_no_live_version(expected):
-        return current_version_column.is_(None)
-    return current_version_column == expected
-
-
 class ComponentArchivedError(ValueError):
     """The component is archived; its id is reserved and its rows immutable.
 
@@ -242,6 +208,7 @@ class TableResolutionCache:
             )
             return
         self._tables[(table_type, table_name)] = table
+        log_debug(f"Table cache: stored '{table_name}' ({table_type})")
 
     def invalidate(self, table_name: str, metadata: Any) -> None:
         """Forget a resolved table after a schema change (ALTER/DROP).
@@ -388,12 +355,12 @@ class BaseDb(ABC):
         if cached is not None:
             return cached
         if not create_table_if_not_found and not self.table_exists(table_name):
-            log_debug(f"Table '{table_name}' does not exist")
             return None
         with self._resolve_lock:
             cached = self._table_cache.get(table_type, table_name)
             if cached is not None:
                 return cached
+            log_debug(f"Table cache: miss for '{table_name}' ({table_type}); resolving from database")
             return self._resolve_table(
                 table_name=table_name, table_type=table_type, create_table_if_not_found=create_table_if_not_found
             )
@@ -1138,8 +1105,7 @@ class BaseDb(ABC):
                 archive: stamp deleted_at, keep every version, reserve the id.
             user_id: If set, only delete the component if owned by this user.
             expected_current_version: Optional compare-and-set guard on the
-                current published version; None skips the check, 0 expects
-                the component to have no published version.
+                current published version; None skips the check.
             require_no_dependents: Refuse when other components pin this one.
                 An archive checks active (non-archived) parents; a hard delete
                 checks every parent, because it would break even an archived
@@ -1328,9 +1294,6 @@ class BaseDb(ABC):
             notes: Optional notes.
             links: Optional list of links. Each link must have child_version set.
             expected_latest_version: Optional CAS guard; None skips the check.
-            expected_current_version: Optional CAS guard on the live pointer a
-                publish replaces; None skips the check, 0 expects no live
-                version (a first publish has nothing to compare against).
             user_id: When set, the write applies only if this user owns the
                 component. A foreign or shared (unowned) row answers the same
                 ValueError a missing component answers, inside the write
@@ -1416,8 +1379,7 @@ class BaseDb(ABC):
             component_id: The component ID.
             version: The version to set as current (must be published).
             expected_current_version: Optional compare-and-set guard on the
-                pointer being replaced; None skips the check, 0 expects no
-                live version (a first publish has nothing to compare against).
+                pointer being replaced; None skips the check.
             user_id: When set, the pointer moves only if this user owns the
                 component; the predicate rides the UPDATE itself. A foreign or
                 shared (unowned) row answers the same False a missing
@@ -1781,8 +1743,17 @@ class BaseDb(ABC):
         limit: int = 100,
         page: int = 1,
         user_id: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """List schedules with optional filtering.
+
+        Args:
+            enabled: Optional filter on the enabled flag.
+            limit: Page size.
+            page: 1-indexed page number.
+            raise_on_error: When True, re-raise DB failures and raise when the
+                schedules table is unavailable (database error or table never
+                created), instead of returning ([], 0).
 
         Returns:
             Tuple of (schedules, total_count)
@@ -2167,12 +2138,12 @@ class AsyncBaseDb(ABC):
         if cached is not None:
             return cached
         if not create_table_if_not_found and not await self.table_exists(table_name):
-            log_debug(f"Table '{table_name}' does not exist")
             return None
         async with self._resolve_lock_async:
             cached = self._table_cache.get(table_type, table_name)
             if cached is not None:
                 return cached
+            log_debug(f"Table cache: miss for '{table_name}' ({table_type}); resolving from database")
             return await self._resolve_table(
                 table_name=table_name, table_type=table_type, create_table_if_not_found=create_table_if_not_found
             )
@@ -3160,8 +3131,17 @@ class AsyncBaseDb(ABC):
         limit: int = 100,
         page: int = 1,
         user_id: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """List schedules with optional filtering.
+
+        Args:
+            enabled: Optional filter on the enabled flag.
+            limit: Page size.
+            page: 1-indexed page number.
+            raise_on_error: When True, re-raise DB failures and raise when the
+                schedules table is unavailable (database error or table never
+                created), instead of returning ([], 0).
 
         Returns:
             Tuple of (schedules, total_count)

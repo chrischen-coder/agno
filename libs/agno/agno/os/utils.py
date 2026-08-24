@@ -866,20 +866,7 @@ def get_knowledge_instance(
             f"Please specify knowledge_id parameter. Available IDs: {knowledge_ids}",
         )
 
-    # No identifiers provided. With nothing registered there is nothing to disambiguate, so the
-    # message below would assert a condition its own empty list disproves. A caller that named
-    # a db_id or knowledge_id is answered above, where "not found" is the more precise answer.
-    if not knowledge_instances:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "No knowledge base is available on this AgentOS. A Knowledge is served over "
-                "/knowledge only once it has a contents_db: pass Knowledge(..., contents_db=<db>) "
-                "to AgentOS(knowledge=[...]), or to an agent or team."
-            ),
-        )
-
-    # List available IDs
+    # No identifiers provided - list available IDs
     knowledge_ids = []
     for k in knowledge_instances:
         if k.contents_db:
@@ -2684,7 +2671,7 @@ def stringify_input_content(input_content: Union[str, Dict[str, Any], List[Any],
 # High-level resolvers with error handling for routers
 # ---------------------------------------------------------------------------
 
-from agno.db.schemas.scheduler import COMPONENT_VERSION_METADATA_KEY, RESERVED_RUN_METADATA_KEYS  # noqa: E402
+from agno.db.schemas.scheduler import COMPONENT_VERSION_METADATA_KEY  # noqa: E402
 
 
 def stamp_component_version(kwargs: Dict[str, Any], version: Optional[int]) -> None:
@@ -2694,14 +2681,13 @@ def stamp_component_version(kwargs: Dict[str, Any], version: Optional[int]) -> N
     ``metadata`` dict (a copy - the request-state dict is never mutated).
 
     The stamp is authoritative for lifecycle re-resolution, so a caller must
-    never supply it. ``metadata`` is a caller-writable form field, so every
-    inbound runtime-owned key is stripped first - a forged version stamp
-    survives an unpinned run and lets ``/continue`` dispatch a draft the
-    caller was refused at run-start, and a forged dispatch lineage would
-    pre-seed or reset the runner's cycle guard. The version key is (re)written
-    only when a version was pinned via the route's own ``version`` parameter.
-    No pinned version means no stamp, so unpinned runs keep their legacy shape
-    unless the caller sent their own (now-sanitized) metadata.
+    never supply it. ``metadata`` is a caller-writable form field, so ANY
+    inbound ``agno_component_version`` is stripped first - otherwise a forged
+    key survives an unpinned run and lets ``/continue`` dispatch a draft the
+    caller was refused at run-start. The key is (re)written only when a
+    version was pinned via the route's own ``version`` parameter. No pinned
+    version means no stamp, so unpinned runs keep their legacy shape unless
+    the caller sent their own (now-sanitized) metadata.
     """
     inbound = kwargs.get("metadata")
     if inbound is not None and not isinstance(inbound, dict):
@@ -2716,10 +2702,8 @@ def stamp_component_version(kwargs: Dict[str, Any], version: Optional[int]) -> N
         inbound = None
     had_metadata = inbound is not None
     metadata = dict(inbound or {})
-    # Strip every forged runtime key before trusting the route's own pinned
-    # version; only the version key is (conditionally) rewritten below.
-    for reserved_key in RESERVED_RUN_METADATA_KEYS:
-        metadata.pop(reserved_key, None)
+    # Strip any forged stamp before trusting the route's own pinned version.
+    metadata.pop(COMPONENT_VERSION_METADATA_KEY, None)
     if version is not None:
         metadata[COMPONENT_VERSION_METADATA_KEY] = version
     # Only touch kwargs when there is a stamp to write or metadata to sanitize;
